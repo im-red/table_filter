@@ -3,8 +3,17 @@
     let overlay = null;
     let state = null;
 
-    function getStorageKey() {
-        return STORAGE_KEY_PREFIX + location.origin;
+    async function hashString(str) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(str);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function getStorageKey() {
+        const hashedOrigin = await hashString(location.origin);
+        return STORAGE_KEY_PREFIX + hashedOrigin;
     }
 
     function createOverlay() {
@@ -75,18 +84,19 @@
             detailDiv.style.display = isHidden ? 'block' : 'none';
         });
 
-        loadState().then(() => renderVars());
+        loadState().then(async () => {
+            await renderVars();
+        });
     }
 
-    function showOverlay() {
+    async function showOverlay() {
         if (!overlay) createOverlay();
         overlay.style.display = 'block';
         // load last state each time
-        loadState().then(() => {
-            renderVars();
-            updateTableInfo();
-            updateVarPreviews();
-        });
+        await loadState();
+        renderVars();
+        updateTableInfo();
+        updateVarPreviews();
     }
 
     function hideOverlay() {
@@ -122,13 +132,13 @@
 
 
         // Add blur listeners to update table info and previews
-        div.querySelector('.tf-var-name').addEventListener('blur', () => {
-            persistState();
+        div.querySelector('.tf-var-name').addEventListener('blur', async () => {
+            await persistState();
             updateTableInfo();
             updateVarPreviews();
         });
-        div.querySelector('.tf-var-selector').addEventListener('blur', () => {
-            persistState();
+        div.querySelector('.tf-var-selector').addEventListener('blur', async () => {
+            await persistState();
             updateTableInfo();
             updateVarPreviews();
         });
@@ -143,15 +153,15 @@
         (state.vars || []).forEach(v => addVarRow(v));
 
         // Add blur listener to table selector input
-        document.getElementById('tf-table-selector').addEventListener('blur', () => {
-            persistState();
+        document.getElementById('tf-table-selector').addEventListener('blur', async () => {
+            await persistState();
             updateTableInfo();
             updateVarPreviews();
         });
 
         // Add input listener to filter expression for real-time save
-        document.getElementById('tf-filter-expr').addEventListener('change', () => {
-            persistState();
+        document.getElementById('tf-filter-expr').addEventListener('change', async () => {
+            await persistState();
             updateFilterPreview();
         });
 
@@ -318,14 +328,16 @@
                 filteredCountElem.style.display = 'inline';
             }
         }, 100); // Small delay to ensure DOM updates are complete
-    } function persistState() {
+    }
+
+    async function persistState() {
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
         const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
         const vars = gatherVarsFromUI();
         const toSave = { tableSelector, filterExpr, vars };
         state = toSave;
-        const key = getStorageKey();
         try {
+            const key = await getStorageKey();
             chrome.storage.local.set({ [key]: toSave }, () => {
                 // auto-saved
             });
@@ -349,21 +361,25 @@
         URL.revokeObjectURL(url);
     }
 
-    function importConfig(event) {
+    async function importConfig(event) {
         const file = event.target.files[0];
         if (!file) return;
         const reader = new FileReader();
-        reader.onload = (e) => {
+        reader.onload = async (e) => {
             try {
                 const config = JSON.parse(e.target.result);
                 if (config.tableSelector !== undefined && config.filterExpr !== undefined && Array.isArray(config.vars)) {
                     state = config;
-                    const key = getStorageKey();
-                    chrome.storage.local.set({ [key]: config }, () => {
-                        renderVars();
-                        updateTableInfo();
-                        updateVarPreviews();
-                    });
+                    try {
+                        const key = await getStorageKey();
+                        chrome.storage.local.set({ [key]: config }, () => {
+                            renderVars();
+                            updateTableInfo();
+                            updateVarPreviews();
+                        });
+                    } catch (e) {
+                        console.warn('storage save failed during import', e);
+                    }
                 } else {
                     alert('Invalid config format');
                 }
@@ -376,23 +392,28 @@
         event.target.value = '';
     }
 
-    function loadState() {
-        const key = getStorageKey();
-        return new Promise(resolve => {
-            try {
-                chrome.storage.local.get([key], (res) => {
-                    if (res && res[key]) {
-                        state = res[key];
-                    } else {
-                        state = getDefaultState();
-                    }
+    async function loadState() {
+        try {
+            const key = await getStorageKey();
+            return new Promise(resolve => {
+                try {
+                    chrome.storage.local.get([key], (res) => {
+                        if (res && res[key]) {
+                            state = res[key];
+                        } else {
+                            state = getDefaultState();
+                        }
+                        resolve(state);
+                    });
+                } catch (e) {
+                    state = getDefaultState();
                     resolve(state);
-                });
-            } catch (e) {
-                state = getDefaultState();
-                resolve(state);
-            }
-        });
+                }
+            });
+        } catch (e) {
+            state = getDefaultState();
+            return Promise.resolve(state);
+        }
     }
 
     function getDefaultState() {
@@ -574,10 +595,10 @@
     }
 
     // message listener to toggle overlay
-    chrome.runtime.onMessage.addListener((msg, sender, resp) => {
+    chrome.runtime.onMessage.addListener(async (msg, sender, resp) => {
         if (msg && msg.type === 'TOGGLE_TABLE_FILTER_OVERLAY') {
             const existing = document.getElementById('table-filter-overlay');
-            if (existing && existing.style.display !== 'none') hideOverlay(); else showOverlay();
+            if (existing && existing.style.display !== 'none') hideOverlay(); else await showOverlay();
         }
     });
 
