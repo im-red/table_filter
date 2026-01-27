@@ -3,8 +3,6 @@ console.log('[eval-sandbox] Sandboxed environment loaded');
 
 function safeEvaluate(expr, context) {
     try {
-        console.log('[eval-sandbox] safeEvaluate called:', { expr, contextKeys: Object.keys(context) });
-
         // Prepare context with all necessary functions and objects
         const evalContext = {
             ...context,
@@ -41,13 +39,11 @@ function safeEvaluate(expr, context) {
         const varNames = Object.keys(evalContext);
         const varValues = varNames.map(name => evalContext[name]);
 
-        console.log('[eval-sandbox] varNames:', varNames, 'varValues:', varValues);
-
         // Use Function constructor (should be allowed in iframe with proper sandbox attributes)
         const fn = new Function(...varNames, `return (${expr})`);
         const result = fn(...varValues);
-        
-        console.log('[eval-sandbox] Evaluation result:', result);
+
+        console.debug('[eval-sandbox] Evaluation success. result:', result, 'expr:', expr, 'context:', context);
         return { success: true, result };
     } catch (err) {
         console.error('[eval-sandbox] Evaluation error:', err.message, 'stack:', err.stack);
@@ -57,11 +53,11 @@ function safeEvaluate(expr, context) {
 
 // Listen for messages from content script
 window.addEventListener('message', (event) => {
-    console.log('[eval-sandbox] Received message from parent:', event.data.type);
+    console.debug('[eval-sandbox] Received message from parent:', event.data.type);
 
     if (event.data.type === 'EVAL_EXPR_REQUEST') {
         const result = safeEvaluate(event.data.expr, event.data.context);
-        
+
         // Send response back to parent
         window.parent.postMessage({
             type: 'EVAL_EXPR_RESPONSE',

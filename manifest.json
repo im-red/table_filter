@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Table Filter Overlay",
+  "name": "Table Filter",
   "version": "0.1",
   "description": "Show an overlay to select tables and filter rows using selectors and expressions.",
   "permissions": [

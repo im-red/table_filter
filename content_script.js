@@ -54,6 +54,18 @@
           <div id="tf-filter-preview-detail" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;border:1px solid #d0d0d0;padding:4px;background:#fff;border-radius:2px;font-size:12px;font-family:monospace;color:#555;"></div>
         </div>
       </div>
+      <div style="margin-bottom:8px">
+        <label style="font-weight:600">Sort Expression (leave empty for no sorting)</label>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+          <input id="tf-sort-expression" style="padding:4px;border:1px solid #ccc;border-radius:2px;flex:1;" placeholder="Enter sort expression (e.g., parseFloat(v1) or v1)" />
+        </div>
+        <div style="margin-top:4px">
+          <div style="cursor:pointer;user-select:none;padding:4px;background:#f0f8f0;border-radius:2px;margin-bottom:4px" id="tf-sort-preview-toggle">
+            <span style="font-weight:600;color:#333">Sort Preview:</span> <span id="tf-sort-preview-summary" style="color:#666">-</span>
+          </div>
+          <div id="tf-sort-preview-detail" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;border:1px solid #d0e0d0;padding:4px;background:#f8fff8;border-radius:2px;font-size:12px;font-family:monospace;color:#555;"></div>
+        </div>
+      </div>
       <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
         <span id="tf-filtered-count" style="font-size:12px;color:#666;display:none">Filtered: -</span>
         <button id="tf-apply">Apply</button>
@@ -80,6 +92,13 @@
         // Add click listener to toggle filter preview expand/collapse
         document.getElementById('tf-filter-preview-toggle').addEventListener('click', () => {
             const detailDiv = document.getElementById('tf-filter-preview-detail');
+            const isHidden = detailDiv.style.display === 'none';
+            detailDiv.style.display = isHidden ? 'block' : 'none';
+        });
+
+        // Add click listener to toggle sort preview expand/collapse
+        document.getElementById('tf-sort-preview-toggle').addEventListener('click', () => {
+            const detailDiv = document.getElementById('tf-sort-preview-detail');
             const isHidden = detailDiv.style.display === 'none';
             detailDiv.style.display = isHidden ? 'block' : 'none';
         });
@@ -150,6 +169,11 @@
         if (!state) state = getDefaultState();
         document.getElementById('tf-table-selector').value = state.tableSelector || 'table';
         document.getElementById('tf-filter-expr').value = state.filterExpr || 'true';
+
+        // Set sort expression
+        const sortExpressionInput = document.getElementById('tf-sort-expression');
+        sortExpressionInput.value = state.sortExpression || '';
+
         (state.vars || []).forEach(v => addVarRow(v));
 
         // Add blur listener to table selector input
@@ -168,10 +192,18 @@
         // Also add input listener for live preview updates
         document.getElementById('tf-filter-expr').addEventListener('input', () => {
             updateFilterPreview();
+            updateSortPreview(); // Also update sort preview when filter changes
+        });
+
+        // Add change listener for sort expression
+        document.getElementById('tf-sort-expression').addEventListener('change', async () => {
+            await persistState();
+            updateSortPreview(); // Update sort preview when sort expression changes
         });
 
         // Update preview initially
         updateFilterPreview();
+        updateSortPreview();
     }
 
     function gatherVarsFromUI() {
@@ -182,6 +214,12 @@
                 selector: div.querySelector('.tf-var-selector').value.trim() || ''
             };
         });
+    }
+
+    function gatherSortConfigFromUI() {
+        return {
+            sortExpression: document.getElementById('tf-sort-expression').value || ''
+        };
     }
 
     async function updateFilterPreview() {
@@ -253,13 +291,122 @@
         }
     }
 
+    async function updateSortPreview() {
+        const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
+        const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
+        const sortConfig = gatherSortConfigFromUI();
+        const vars = gatherVarsFromUI();
+        const tables = Array.from(document.querySelectorAll(tableSelector));
+
+        if (!tables.length) {
+            // Update sort preview with no data
+            const sortSummaryDiv = document.getElementById('tf-sort-preview-summary');
+            if (sortSummaryDiv) {
+                sortSummaryDiv.textContent = 'No tables found';
+            }
+            const sortDetailDiv = document.getElementById('tf-sort-preview-detail');
+            if (sortDetailDiv) {
+                sortDetailDiv.innerHTML = '<div style="color:#999">No tables found</div>';
+            }
+            return;
+        }
+
+        // Don't show preview if no sorting is configured (empty expression)
+        if (!sortConfig.sortExpression || sortConfig.sortExpression === '') {
+            const sortSummaryDiv = document.getElementById('tf-sort-preview-summary');
+            if (sortSummaryDiv) {
+                sortSummaryDiv.textContent = 'No sorting applied';
+            }
+            const sortDetailDiv = document.getElementById('tf-sort-preview-detail');
+            if (sortDetailDiv) {
+                sortDetailDiv.innerHTML = '<div style="color:#999">No sorting applied</div>';
+            }
+            return;
+        }
+
+        const previewResults = [];
+        const previewSummary = [];
+        let rowCount = 0;
+
+        // Collect sample rows to show sort preview
+        for (const tab of tables) {
+            const rows = Array.from(tab.querySelectorAll('tr'));
+            for (const row of rows) {
+                if (rowCount >= 10) break; // Limit to first 5 rows for preview
+
+                try {
+                    // Compute variables for this row
+                    const ctx = {};
+                    for (const v of vars) {
+                        let el = null;
+                        if (v.selector) {
+                            el = row.querySelector(v.selector);
+                        }
+                        ctx[v.name] = el ? el.textContent.trim() : '';
+                    }
+
+                    // Evaluate filter expression to see if row would pass
+                    let passesFilter = false;
+                    try {
+                        passesFilter = Boolean(await evalExpressionInBackground(filterExpr, ctx));
+                    } catch (err) {
+                        passesFilter = false;
+                    }
+
+                    let sortValue = 'N/A';
+                    if (sortConfig.sortExpression) {
+                        try {
+                            const result = Number(await evalExpressionInBackground(sortConfig.sortExpression, ctx));
+                            console.debug('Sort expression result:', result, 'expression:', sortConfig.sortExpression, 'context:', ctx);
+                            sortValue = result;
+                        } catch (err) {
+                            console.error('Sort expression error:', err, 'expression:', sortConfig.sortExpression, 'context:', ctx);
+                            sortValue = 'ERROR';
+                        }
+                    }
+
+                    previewResults.push(`Row ${rowCount + 1}: Sort Value: ${sortValue}, (vars: ${JSON.stringify(ctx)})`);
+                    previewSummary.push(`${sortValue}`);
+                    rowCount++;
+                } catch (err) {
+                    console.error('Sort expression error:', err, 'expression:', sortConfig.sortExpression, 'context:', ctx);
+                    previewResults.push(`Row ${rowCount + 1}: ERROR - ${err.message}`);
+                    previewSummary.push(0);
+                    rowCount++;
+                }
+            }
+        }
+
+        // Update sort preview summary (collapsed view)
+        const sortSummaryDiv = document.getElementById('tf-sort-preview-summary');
+        if (sortSummaryDiv) {
+            if (previewSummary.length > 0) {
+                sortSummaryDiv.textContent = previewSummary.join(', ');
+                sortSummaryDiv.title = 'Click to expand sort preview';
+            } else {
+                sortSummaryDiv.textContent = 'No data';
+            }
+        }
+
+        // Update sort detailed preview (expanded view)
+        const sortDetailDiv = document.getElementById('tf-sort-preview-detail');
+        if (sortDetailDiv) {
+            if (previewResults.length > 0) {
+                sortDetailDiv.innerHTML = previewResults.join('<br>');
+            } else {
+                sortDetailDiv.innerHTML = '<div style="color:#999">No data</div>';
+            }
+        }
+    }
+
     function applyAndShow() {
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
         const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
         const vars = gatherVarsFromUI();
+        const sortConfig = gatherSortConfigFromUI();
 
         // Save temporarily to state
-        state = { tableSelector, filterExpr, vars };
+        state = { tableSelector, filterExpr, vars, ...sortConfig };
         updateTableInfo(); // Update total count
         updateVarPreviews();
         applyFilter(state);
@@ -274,10 +421,16 @@
         const allPromises = [];
         let passedCount = 0; // Track passed rows
 
-        tables.forEach(tab => {
+        // Process each table separately
+        for (const tab of tables) {
             const rows = Array.from(tab.querySelectorAll('tr'));
             console.log('Found rows in table:', rows.length);
-            rows.forEach(row => {
+
+            // Array to hold rows with their context for sorting
+            const processedRows = [];
+
+            // Process each row to determine if it passes the filter
+            for (const row of rows) {
                 const promise = (async () => {
                     // compute variables - extract values using el.textContent.trim()
                     const ctx = {};
@@ -290,6 +443,7 @@
                             // Extract value directly using textContent.trim()
                             ctx[v.name] = el ? el.textContent.trim() : '';
                         } catch (err) {
+                            console.error('Error extracting value for variable:', v.name, 'error:', err);
                             ctx[v.name] = '';
                         }
                     }
@@ -298,22 +452,71 @@
                     let pass = false;
                     try {
                         pass = Boolean(await evalExpressionInBackground(s.filterExpr, ctx));
-                        console.log('Filter result for row:', pass, 'context:', ctx);
+                        console.debug('Filter result for row:', pass, 'context:', ctx);
                     } catch (err) {
                         console.error('Error evaluating filter:', err);
                         pass = false;
                     }
 
-                    row.style.display = pass ? '' : 'none';
-
-                    // Only count visible rows after filtering
+                    // Only store rows that pass the filter for sorting
                     if (pass) {
+                        processedRows.push({ row, ctx });
                         passedCount++;
                     }
+
+                    // Hide rows that don't pass the filter
+                    row.style.display = pass ? '' : 'none';
                 })();
                 allPromises.push(promise);
-            });
-        });
+            }
+
+            // Wait for all rows to be processed in this table
+            await Promise.all(allPromises.slice(-rows.length)); // Get the last 'rows.length' promises
+
+            // Sort the rows that passed the filter if sorting is enabled
+            if (s.sortExpression && s.sortExpression !== '') {
+                console.log('Sorting rows with expression:', s.sortExpression);
+                // Sort by expression evaluation
+                // First, compute the sort values for each row
+                for (const item of processedRows) {
+                    try {
+                        const result = Number(await evalExpressionInBackground(s.sortExpression, item.ctx));
+                        console.debug('Sort expression result:', result, 'expression:', s.sortExpression, 'context:', item.ctx);
+                        item.sortValue = result;
+                    } catch (err) {
+                        console.error('Sort expression error:', err, 'expression:', s.sortExpression, 'context:', item.ctx);
+                        item.sortValue = 'ERROR';
+                    }
+                }
+
+                // Now sort based on computed sort values in descending order (larger values first)
+                processedRows.sort((a, b) => {
+                    const valA = a.sortValue !== undefined ? a.sortValue : '';
+                    const valB = b.sortValue !== undefined ? b.sortValue : '';
+
+                    // Try to convert to numbers for numeric comparison if possible
+                    let numA = Number(valA);
+                    let numB = Number(valB);
+
+                    let comparison = 0;
+                    if (!isNaN(numA) && !isNaN(numB)) {
+                        // Both are numbers - sort in descending order (larger values first)
+                        comparison = numB - numA;  // Note: B - A for descending order
+                    } else {
+                        // Convert to string for comparison if not numbers
+                        comparison = String(valB).localeCompare(String(valA)); // Note: B compared to A for descending order
+                    }
+
+                    return comparison;
+                });
+
+                // Reorder the rows in the DOM based on the sorted order
+                const tbody = tab.querySelector('tbody') || tab;
+                processedRows.forEach(item => {
+                    tbody.appendChild(item.row); // This moves the element to the end
+                });
+            }
+        }
 
         console.log('Waiting for', allPromises.length, 'promises');
         await Promise.all(allPromises);
@@ -334,7 +537,8 @@
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
         const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
         const vars = gatherVarsFromUI();
-        const toSave = { tableSelector, filterExpr, vars };
+        const sortConfig = gatherSortConfigFromUI();
+        const toSave = { tableSelector, filterExpr, vars, ...sortConfig };
         state = toSave;
         try {
             const key = await getStorageKey();
@@ -342,7 +546,7 @@
                 // auto-saved
             });
         } catch (e) {
-            console.warn('storage save failed', e);
+            console.error('storage save failed', e);
         }
     }
 
@@ -378,7 +582,7 @@
                             updateVarPreviews();
                         });
                     } catch (e) {
-                        console.warn('storage save failed during import', e);
+                        console.error('storage save failed during import', e);
                     }
                 } else {
                     alert('Invalid config format');
@@ -420,6 +624,7 @@
         return {
             tableSelector: 'table',
             filterExpr: 'true',
+            sortExpression: '',
             vars: [
                 { name: 'v1', selector: 'td:nth-child(1)' },
                 { name: 'v2', selector: 'td:nth-child(2)' },
@@ -475,7 +680,7 @@
     }
 
     function evalExpressionInBackground(expr, context) {
-        console.log('[content_script] evalExpressionInBackground called:', { expr, context });
+        console.debug('[content_script] evalExpressionInBackground called:', { expr, context });
         return getOrCreateEvalSandbox().then((iframe) => {
             return new Promise((resolve, reject) => {
                 const id = ++requestId;
@@ -487,9 +692,10 @@
                         window.removeEventListener('message', responseHandler);
                         const { success, result, error } = event.data;
                         if (success) {
-                            console.log('[content_script] sandbox eval result:', result);
+                            console.debug('[content_script] sandbox eval result:', result);
                             resolve(result);
                         } else {
+                            console.error('[content_script] sandbox eval error:', error);
                             reject(new Error(error));
                         }
                     }
