@@ -130,12 +130,17 @@
         div.style = 'border:1px solid #eee;padding:8px;margin:6px 0;border-radius:4px;background:#fafafa';
 
         const idx = container.children.length;
-        const d = def || { name: `v${idx + 1}`, selector: `td:nth-child(${idx + 1})` };
+        // Provide defaults for type if not specified
+        const d = def || { name: `v${idx + 1}`, selector: `td:nth-child(${idx + 1})`, type: 'number' };
 
         div.innerHTML = `
       <div style="display:flex;gap:8px;align-items:center">
         <input class="tf-var-name" placeholder="name" style="width:100px;padding:4px" value="${escapeHtml(d.name)}" />
         <input class="tf-var-selector" placeholder="selector (relative to row)" style="flex:1;padding:4px" value="${escapeHtml(d.selector)}" />
+        <select class="tf-var-type" style="padding:4px;border:1px solid #ccc;border-radius:2px;">
+          <option value="number" ${d.type === 'number' ? 'selected' : ''}>Number</option>
+          <option value="text" ${d.type === 'text' ? 'selected' : ''}>Text</option>
+        </select>
         <button class="tf-remove-var">Remove</button>
       </div>
       <div style="margin-top:6px;padding:6px;background:#f5f5f5;border-radius:3px;border:1px solid #e0e0e0;font-size:11px;font-family:monospace;color:#555">
@@ -150,13 +155,18 @@
 
 
 
-        // Add blur listeners to update table info and previews
+        // Add blur/change listeners to update table info and previews
         div.querySelector('.tf-var-name').addEventListener('blur', async () => {
             await persistState();
             updateTableInfo();
             updateVarPreviews();
         });
         div.querySelector('.tf-var-selector').addEventListener('blur', async () => {
+            await persistState();
+            updateTableInfo();
+            updateVarPreviews();
+        });
+        div.querySelector('.tf-var-type').addEventListener('change', async () => {
             await persistState();
             updateTableInfo();
             updateVarPreviews();
@@ -211,7 +221,8 @@
         return rows.map(div => {
             return {
                 name: div.querySelector('.tf-var-name').value.trim() || 'v',
-                selector: div.querySelector('.tf-var-selector').value.trim() || ''
+                selector: div.querySelector('.tf-var-selector').value.trim() || '',
+                type: div.querySelector('.tf-var-type').value || 'number'
             };
         });
     }
@@ -245,8 +256,18 @@
                         if (v.selector) {
                             el = row.querySelector(v.selector);
                         }
-                        // Extract value directly using textContent.trim()
-                        ctx[v.name] = el ? el.textContent.trim() : '';
+
+                        let rawValue = el ? el.textContent.trim() : '';
+
+                        // Process value based on variable type
+                        if (v.type === 'number') {
+                            // Parse as number, fallback to 0 if NaN
+                            const parsedValue = Number(rawValue);
+                            ctx[v.name] = isNaN(parsedValue) ? 0 : parsedValue;
+                        } else {
+                            // Default to text
+                            ctx[v.name] = rawValue;
+                        }
                     }
 
                     // evaluate filter expression for preview
@@ -342,7 +363,18 @@
                         if (v.selector) {
                             el = row.querySelector(v.selector);
                         }
-                        ctx[v.name] = el ? el.textContent.trim() : '';
+
+                        let rawValue = el ? el.textContent.trim() : '';
+
+                        // Process value based on variable type
+                        if (v.type === 'number') {
+                            // Parse as number, fallback to 0 if NaN
+                            const parsedValue = Number(rawValue);
+                            ctx[v.name] = isNaN(parsedValue) ? 0 : parsedValue;
+                        } else {
+                            // Default to text
+                            ctx[v.name] = rawValue;
+                        }
                     }
 
                     // Evaluate filter expression to see if row would pass
@@ -440,11 +472,21 @@
                             if (v.selector) {
                                 el = row.querySelector(v.selector);
                             }
-                            // Extract value directly using textContent.trim()
-                            ctx[v.name] = el ? el.textContent.trim() : '';
+
+                            let rawValue = el ? el.textContent.trim() : '';
+
+                            // Process value based on variable type
+                            if (v.type === 'number') {
+                                // Parse as number, fallback to 0 if NaN
+                                const parsedValue = Number(rawValue);
+                                ctx[v.name] = isNaN(parsedValue) ? 0 : parsedValue;
+                            } else {
+                                // Default to text
+                                ctx[v.name] = rawValue;
+                            }
                         } catch (err) {
                             console.error('Error extracting value for variable:', v.name, 'error:', err);
-                            ctx[v.name] = '';
+                            ctx[v.name] = v.type === 'number' ? 0 : '';
                         }
                     }
 
@@ -626,9 +668,9 @@
             filterExpr: 'true',
             sortExpression: '',
             vars: [
-                { name: 'v1', selector: 'td:nth-child(1)' },
-                { name: 'v2', selector: 'td:nth-child(2)' },
-                { name: 'v3', selector: 'td:nth-child(3)' }
+                { name: 'v1', selector: 'td:nth-child(1)', type: 'number' },
+                { name: 'v2', selector: 'td:nth-child(2)', type: 'number' },
+                { name: 'v3', selector: 'td:nth-child(3)', type: 'number' }
             ]
         };
     }
