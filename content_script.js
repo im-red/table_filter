@@ -3,6 +3,167 @@
     let overlay = null;
     let state = null;
 
+    // Helper function to clean up cached data
+    function cleanupCachedData(tables) {
+        for (const tab of tables) {
+            const rows = Array.from(tab.querySelectorAll('tr'));
+            for (const row of rows) {
+                // Clean up cached data attributes
+                delete row.dataset.varValues;
+                delete row.dataset.filterResult;
+                delete row.dataset.sortValue;
+            }
+        }
+    };
+
+    // Helper function to create filtered table
+    function createFilteredTable(originalTable, passedRows) {
+        // Create a new table element
+        const filteredTable = originalTable.cloneNode(false); // Clone without children
+        filteredTable.id = originalTable.id + '-filtered';
+        filteredTable.style.display = '';
+
+        // Clone the header if it exists
+        const thead = originalTable.querySelector('thead');
+        if (thead) {
+            const clonedThead = thead.cloneNode(true);
+            filteredTable.appendChild(clonedThead);
+        }
+
+        // Add the passed rows to the new table
+        passedRows.forEach(item => {
+            filteredTable.appendChild(item.row.cloneNode(true));
+        });
+
+        // Insert the filtered table after the original table
+        originalTable.parentNode.insertBefore(filteredTable, originalTable.nextSibling);
+
+        return filteredTable;
+    };
+
+    // Helper function to restore original table
+    function restoreOriginalTable(originalTable) {
+        // Remove the filtered table if it exists
+        const filteredTable = document.getElementById(originalTable.id + '-filtered');
+        if (filteredTable) {
+            filteredTable.remove();
+        }
+
+        // Show the original table
+        originalTable.style.display = '';
+    };
+
+    // Function to restore all original tables
+    function restoreAllOriginalTables() {
+        const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
+        // Find all original tables (excluding filtered tables and overlay tables)
+        const originalTables = Array.from(document.querySelectorAll(`${tableSelector}:not(#table-filter-overlay *):not([id$="-filtered"])`));
+
+        for (const tab of originalTables) {
+            restoreOriginalTable(tab);
+        }
+
+        // Update table info to show original counts
+        updateTableInfo(null);
+
+        // Hide the filtered count display
+        const filteredCountElem = document.getElementById('tf-filtered-count');
+        if (filteredCountElem) {
+            filteredCountElem.style.display = 'none';
+        }
+    };
+
+    // Helper function to update cache for a single row
+    async function updateRowCache(row, vars, filterExpr, sortExpression) {
+        // Check if we already have cached variable values
+        let ctx = null;
+        if (row.dataset.varValues) {
+            try {
+                ctx = JSON.parse(row.dataset.varValues);
+            } catch (e) {
+                ctx = null; // Fallback to recalculation
+            }
+        }
+
+        // Calculate variables if not cached
+        if (!ctx) {
+            ctx = {};
+            for (const v of vars) {
+                try {
+                    let el = null;
+                    if (v.selector) {
+                        el = row.querySelector(v.selector);
+                    }
+
+                    let rawValue = el ? el.textContent.trim() : '';
+
+                    // Process value based on variable type
+                    if (v.type === 'number') {
+                        // Parse as number, fallback to 0 if NaN
+                        const parsedValue = Number(rawValue);
+                        ctx[v.name] = isNaN(parsedValue) ? 0 : parsedValue;
+                    } else {
+                        // Default to text
+                        ctx[v.name] = rawValue;
+                    }
+                } catch (err) {
+                    console.error('Error extracting value for variable:', v.name, 'error:', err);
+                    ctx[v.name] = v.type === 'number' ? 0 : '';
+                }
+            }
+
+            // Cache the variable values in the DOM node
+            row.dataset.varValues = JSON.stringify(ctx);
+        }
+
+        // Update filter result cache
+        let pass = false;
+        try {
+            pass = Boolean(await evalExpressionInBackground(filterExpr, ctx));
+            // Cache the filter result
+            row.dataset.filterResult = pass;
+        } catch (err) {
+            console.error('Error evaluating filter:', err);
+            pass = false;
+            row.dataset.filterResult = false;
+        }
+
+        // Update sort value cache if sort expression is provided
+        if (sortExpression && sortExpression !== '') {
+            try {
+                const result = Number(await evalExpressionInBackground(sortExpression, ctx));
+                // Cache the sort value in the DOM node
+                row.dataset.sortValue = result;
+            } catch (err) {
+                console.error('Sort expression error:', err, 'expression:', sortExpression, 'context:', ctx);
+                row.dataset.sortValue = 'ERROR';
+            }
+        }
+    }
+
+    // Helper function to update cache for all rows
+    async function updateAllRowsCache() {
+        // Get current state values
+        const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
+        const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
+        const vars = gatherVarsFromUI();
+        const sortConfig = gatherSortConfigFromUI();
+
+        // Only update cache for original tables (exclude filtered tables and overlay tables)
+        const tables = Array.from(document.querySelectorAll(`${tableSelector}:not(#table-filter-overlay *):not([id$="-filtered"])`));
+        const allPromises = [];
+
+        for (const tab of tables) {
+            const rows = Array.from(tab.querySelectorAll('tr'));
+            for (const row of rows) {
+                const promise = updateRowCache(row, vars, filterExpr, sortConfig.sortExpression);
+                allPromises.push(promise);
+            }
+        }
+
+        await Promise.all(allPromises);
+    }
+
     async function hashString(str) {
         const encoder = new TextEncoder();
         const data = encoder.encode(str);
@@ -69,6 +230,7 @@
       <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
         <span id="tf-filtered-count" style="font-size:12px;color:#666;display:none">Filtered: -</span>
         <button id="tf-apply">Apply</button>
+        <button id="tf-restore">Restore</button>
         <button id="tf-export">Export JSON</button>
         <button id="tf-import">Import JSON</button>
         <input id="tf-import-file" type="file" accept=".json" style="display:none" />
@@ -83,6 +245,7 @@
         document.getElementById('tf-close').addEventListener('click', hideOverlay);
         document.getElementById('tf-add-var').addEventListener('click', addVarRow);
         document.getElementById('tf-apply').addEventListener('click', applyAndShow);
+        document.getElementById('tf-restore').addEventListener('click', restoreAllOriginalTables);
         document.getElementById('tf-export').addEventListener('click', exportConfig);
         document.getElementById('tf-import').addEventListener('click', () => {
             document.getElementById('tf-import-file').click();
@@ -159,16 +322,22 @@
         div.querySelector('.tf-var-name').addEventListener('blur', async () => {
             await persistState();
             updateTableInfo();
+            // Update cache for all relevant rows since variable definition changed
+            await updateAllRowsCache();
             updateVarPreviews();
         });
         div.querySelector('.tf-var-selector').addEventListener('blur', async () => {
             await persistState();
             updateTableInfo();
+            // Update cache for all relevant rows since variable definition changed
+            await updateAllRowsCache();
             updateVarPreviews();
         });
         div.querySelector('.tf-var-type').addEventListener('change', async () => {
             await persistState();
             updateTableInfo();
+            // Update cache for all relevant rows since variable definition changed
+            await updateAllRowsCache();
             updateVarPreviews();
         });
     }
@@ -190,25 +359,37 @@
         document.getElementById('tf-table-selector').addEventListener('blur', async () => {
             await persistState();
             updateTableInfo();
+            // Update cache for all relevant rows since table selector changed
+            await updateAllRowsCache();
             updateVarPreviews();
         });
 
         // Add input listener to filter expression for real-time save
         document.getElementById('tf-filter-expr').addEventListener('change', async () => {
             await persistState();
+            // Update cache for all relevant rows since filter expression changed
+            await updateAllRowsCache();
+            // Only update preview to show cached data - no recomputation
             updateFilterPreview();
+            updateSortPreview();
         });
 
-        // Also add input listener for live preview updates
-        document.getElementById('tf-filter-expr').addEventListener('input', () => {
+        // Also add input listener for live preview updates (shows cached data only)
+        document.getElementById('tf-filter-expr').addEventListener('input', async () => {
+            // Update cache for all relevant rows since filter expression changed
+            await updateAllRowsCache();
+            // Only show cached data - no recomputation
             updateFilterPreview();
-            updateSortPreview(); // Also update sort preview when filter changes
+            updateSortPreview();
         });
 
         // Add change listener for sort expression
         document.getElementById('tf-sort-expression').addEventListener('change', async () => {
             await persistState();
-            updateSortPreview(); // Update sort preview when sort expression changes
+            // Update cache for all relevant rows since sort expression changed
+            await updateAllRowsCache();
+            // Only update preview to show cached data - no recomputation
+            updateSortPreview();
         });
 
         // Update preview initially
@@ -234,10 +415,10 @@
     }
 
     async function updateFilterPreview() {
+        // Only show cached data, don't recompute anything
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
-        const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
-        const vars = gatherVarsFromUI();
-        const tables = Array.from(document.querySelectorAll(tableSelector));
+        // Only access original tables (exclude filtered tables and overlay tables)
+        const tables = Array.from(document.querySelectorAll(`${tableSelector}:not(#table-filter-overlay *):not([id$="-filtered"])`));
 
         const previewResults = [];
         const previewSummary = [];
@@ -249,37 +430,30 @@
                 if (rowCount >= 10) break;
 
                 try {
-                    // compute variables - extract values using el.textContent.trim()
-                    const ctx = {};
-                    for (const v of vars) {
-                        let el = null;
-                        if (v.selector) {
-                            el = row.querySelector(v.selector);
-                        }
+                    // Get cached data from the DOM node
+                    let ctx = null;
+                    let filterResult = null;
 
-                        let rawValue = el ? el.textContent.trim() : '';
-
-                        // Process value based on variable type
-                        if (v.type === 'number') {
-                            // Parse as number, fallback to 0 if NaN
-                            const parsedValue = Number(rawValue);
-                            ctx[v.name] = isNaN(parsedValue) ? 0 : parsedValue;
-                        } else {
-                            // Default to text
-                            ctx[v.name] = rawValue;
+                    // Get cached variable values
+                    if (row.dataset.varValues) {
+                        try {
+                            ctx = JSON.parse(row.dataset.varValues);
+                        } catch (e) {
+                            ctx = null;
                         }
                     }
 
-                    // evaluate filter expression for preview
-                    let result = false;
-                    try {
-                        result = Boolean(await evalExpressionInBackground(filterExpr, ctx));
-                    } catch (err) {
-                        result = false;
+                    // Get cached filter result
+                    if (row.dataset.filterResult !== undefined) {
+                        filterResult = row.dataset.filterResult === 'true'; // Convert string back to boolean
                     }
 
-                    previewResults.push(`Row ${rowCount + 1}: ${result ? 'PASS' : 'FAIL'} (vars: ${JSON.stringify(ctx)})`);
-                    previewSummary.push(result ? 'PASS' : 'FAIL');
+                    // Only show cached data - if not available, show placeholder
+                    const result = filterResult !== null ? (filterResult ? 'PASS' : 'FAIL') : 'UNCACHED';
+                    const varsDisplay = ctx ? JSON.stringify(ctx) : '{}';
+
+                    previewResults.push(`Row ${rowCount + 1}: ${result} (vars: ${varsDisplay})`);
+                    previewSummary.push(result);
                     rowCount++;
                 } catch (err) {
                     previewResults.push(`Row ${rowCount + 1}: ERROR - ${err.message}`);
@@ -313,11 +487,11 @@
     }
 
     async function updateSortPreview() {
+        // Only show cached data, don't recompute anything
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
-        const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
         const sortConfig = gatherSortConfigFromUI();
-        const vars = gatherVarsFromUI();
-        const tables = Array.from(document.querySelectorAll(tableSelector));
+        // Only access original tables (exclude filtered tables and overlay tables)
+        const tables = Array.from(document.querySelectorAll(`${tableSelector}:not(#table-filter-overlay *):not([id$="-filtered"])`));
 
         if (!tables.length) {
             // Update sort preview with no data
@@ -349,61 +523,41 @@
         const previewSummary = [];
         let rowCount = 0;
 
-        // Collect sample rows to show sort preview
+        // Collect sample rows to show sort preview from cached data
         for (const tab of tables) {
             const rows = Array.from(tab.querySelectorAll('tr'));
             for (const row of rows) {
-                if (rowCount >= 10) break; // Limit to first 5 rows for preview
+                if (rowCount >= 10) break;
 
                 try {
-                    // Compute variables for this row
-                    const ctx = {};
-                    for (const v of vars) {
-                        let el = null;
-                        if (v.selector) {
-                            el = row.querySelector(v.selector);
-                        }
+                    // Get cached data from the DOM node
+                    let ctx = null;
+                    let sortValue = null;
 
-                        let rawValue = el ? el.textContent.trim() : '';
-
-                        // Process value based on variable type
-                        if (v.type === 'number') {
-                            // Parse as number, fallback to 0 if NaN
-                            const parsedValue = Number(rawValue);
-                            ctx[v.name] = isNaN(parsedValue) ? 0 : parsedValue;
-                        } else {
-                            // Default to text
-                            ctx[v.name] = rawValue;
-                        }
-                    }
-
-                    // Evaluate filter expression to see if row would pass
-                    let passesFilter = false;
-                    try {
-                        passesFilter = Boolean(await evalExpressionInBackground(filterExpr, ctx));
-                    } catch (err) {
-                        passesFilter = false;
-                    }
-
-                    let sortValue = 'N/A';
-                    if (sortConfig.sortExpression) {
+                    // Get cached variable values
+                    if (row.dataset.varValues) {
                         try {
-                            const result = Number(await evalExpressionInBackground(sortConfig.sortExpression, ctx));
-                            console.debug('Sort expression result:', result, 'expression:', sortConfig.sortExpression, 'context:', ctx);
-                            sortValue = result;
-                        } catch (err) {
-                            console.error('Sort expression error:', err, 'expression:', sortConfig.sortExpression, 'context:', ctx);
-                            sortValue = 'ERROR';
+                            ctx = JSON.parse(row.dataset.varValues);
+                        } catch (e) {
+                            ctx = null;
                         }
                     }
 
-                    previewResults.push(`Row ${rowCount + 1}: Sort Value: ${sortValue}, (vars: ${JSON.stringify(ctx)})`);
-                    previewSummary.push(`${sortValue}`);
+                    // Get cached sort value
+                    if (row.dataset.sortValue !== undefined) {
+                        sortValue = parseFloat(row.dataset.sortValue);
+                    }
+
+                    // Only show cached data - if not available, show placeholder
+                    const displayValue = sortValue !== null ? sortValue : 'UNCACHED';
+                    const varsDisplay = ctx ? JSON.stringify(ctx) : '{}';
+
+                    previewResults.push(`Row ${rowCount + 1}: Sort Value: ${displayValue}, (vars: ${varsDisplay})`);
+                    previewSummary.push(`${displayValue}`);
                     rowCount++;
                 } catch (err) {
-                    console.error('Sort expression error:', err, 'expression:', sortConfig.sortExpression, 'context:', ctx);
                     previewResults.push(`Row ${rowCount + 1}: ERROR - ${err.message}`);
-                    previewSummary.push(0);
+                    previewSummary.push('ERROR');
                     rowCount++;
                 }
             }
@@ -431,7 +585,7 @@
         }
     }
 
-    function applyAndShow() {
+    async function applyAndShow() {
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
         const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
         const vars = gatherVarsFromUI();
@@ -440,74 +594,55 @@
         // Save temporarily to state
         state = { tableSelector, filterExpr, vars, ...sortConfig };
         updateTableInfo(); // Update total count
+
+        // Since cache is already updated on input changes, 
+        // applyFilter just needs to apply visibility and sorting
+        await applyFilter(state);
+
+        // Update previews to show the cached data
         updateVarPreviews();
-        applyFilter(state);
+        updateFilterPreview();
+        updateSortPreview();
     }
 
     async function applyFilter(s) {
         console.log('applyFilter called with:', s);
-        const tables = Array.from(document.querySelectorAll(s.tableSelector));
+        // Exclude tables inside the overlay from filtering/sorting
+        const tables = Array.from(document.querySelectorAll(`${s.tableSelector}:not(#table-filter-overlay *)`));
         console.log('Found tables:', tables.length);
         if (!tables.length) return;
+
+        // Clean up old cached data before processing
+        cleanupCachedData(tables);
 
         const allPromises = [];
         let passedCount = 0; // Track passed rows
 
         // Process each table separately
         for (const tab of tables) {
+            // First, restore the original table if it was hidden
+            restoreOriginalTable(tab);
+
             const rows = Array.from(tab.querySelectorAll('tr'));
             console.log('Found rows in table:', rows.length);
 
-            // Array to hold rows with their context for sorting
-            const processedRows = [];
+            // Array to hold rows that pass the filter
+            const passedRows = [];
 
             // Process each row to determine if it passes the filter
             for (const row of rows) {
                 const promise = (async () => {
-                    // compute variables - extract values using el.textContent.trim()
-                    const ctx = {};
-                    for (const v of s.vars) {
-                        try {
-                            let el = null;
-                            if (v.selector) {
-                                el = row.querySelector(v.selector);
-                            }
+                    // Update cache for this row
+                    await updateRowCache(row, s.vars, s.filterExpr, s.sortExpression);
 
-                            let rawValue = el ? el.textContent.trim() : '';
-
-                            // Process value based on variable type
-                            if (v.type === 'number') {
-                                // Parse as number, fallback to 0 if NaN
-                                const parsedValue = Number(rawValue);
-                                ctx[v.name] = isNaN(parsedValue) ? 0 : parsedValue;
-                            } else {
-                                // Default to text
-                                ctx[v.name] = rawValue;
-                            }
-                        } catch (err) {
-                            console.error('Error extracting value for variable:', v.name, 'error:', err);
-                            ctx[v.name] = v.type === 'number' ? 0 : '';
-                        }
-                    }
-
-                    // evaluate filter expression
-                    let pass = false;
-                    try {
-                        pass = Boolean(await evalExpressionInBackground(s.filterExpr, ctx));
-                        console.debug('Filter result for row:', pass, 'context:', ctx);
-                    } catch (err) {
-                        console.error('Error evaluating filter:', err);
-                        pass = false;
-                    }
+                    // Get the cached filter result
+                    const pass = row.dataset.filterResult === 'true'; // Convert string back to boolean
 
                     // Only store rows that pass the filter for sorting
                     if (pass) {
-                        processedRows.push({ row, ctx });
+                        passedRows.push({ row });
                         passedCount++;
                     }
-
-                    // Hide rows that don't pass the filter
-                    row.style.display = pass ? '' : 'none';
                 })();
                 allPromises.push(promise);
             }
@@ -520,19 +655,19 @@
                 console.log('Sorting rows with expression:', s.sortExpression);
                 // Sort by expression evaluation
                 // First, compute the sort values for each row
-                for (const item of processedRows) {
-                    try {
-                        const result = Number(await evalExpressionInBackground(s.sortExpression, item.ctx));
-                        console.debug('Sort expression result:', result, 'expression:', s.sortExpression, 'context:', item.ctx);
-                        item.sortValue = result;
-                    } catch (err) {
-                        console.error('Sort expression error:', err, 'expression:', s.sortExpression, 'context:', item.ctx);
-                        item.sortValue = 'ERROR';
+                for (const item of passedRows) {
+                    // Get the cached sort value
+                    let sortValue = null;
+                    if (item.row.dataset.sortValue !== undefined) {
+                        sortValue = parseFloat(item.row.dataset.sortValue);
                     }
+
+                    console.debug('Sort expression result:', sortValue, 'expression:', s.sortExpression);
+                    item.sortValue = sortValue;
                 }
 
                 // Now sort based on computed sort values in descending order (larger values first)
-                processedRows.sort((a, b) => {
+                passedRows.sort((a, b) => {
                     const valA = a.sortValue !== undefined ? a.sortValue : '';
                     const valB = b.sortValue !== undefined ? b.sortValue : '';
 
@@ -551,12 +686,12 @@
 
                     return comparison;
                 });
+            }
 
-                // Reorder the rows in the DOM based on the sorted order
-                const tbody = tab.querySelector('tbody') || tab;
-                processedRows.forEach(item => {
-                    tbody.appendChild(item.row); // This moves the element to the end
-                });
+            // Create filtered table and hide original table
+            if (passedRows.length > 0) {
+                createFilteredTable(tab, passedRows);
+                tab.style.display = 'none'; // Hide original table
             }
         }
 
@@ -766,7 +901,8 @@
 
     function updateTableInfo(filteredRowCount = null) {
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
-        const tables = Array.from(document.querySelectorAll(tableSelector));
+        // Only count rows from original tables (exclude filtered tables and overlay tables)
+        const tables = Array.from(document.querySelectorAll(`${tableSelector}:not(#table-filter-overlay *):not([id$="-filtered"])`));
         let totalRows = 0;
         tables.forEach(tab => {
             const rows = Array.from(tab.querySelectorAll('tr'));
@@ -796,7 +932,8 @@
     async function updateVarPreviews() {
         const tableSelector = document.getElementById('tf-table-selector').value.trim() || 'table';
         const vars = gatherVarsFromUI();
-        const tables = Array.from(document.querySelectorAll(tableSelector));
+        // Only access original tables (exclude filtered tables and overlay tables)
+        const tables = Array.from(document.querySelectorAll(`${tableSelector}:not(#table-filter-overlay *):not([id$="-filtered"])`));
 
         const summaryElems = document.querySelectorAll('.tf-preview-summary');
 
@@ -806,19 +943,25 @@
             const v = vars[varIdx];
             const previews = [];
 
-            // collect first 10 rows of values
+            // collect first 10 rows of values from cache
             let rowCount = 0;
             for (const tab of tables) {
                 const rows = Array.from(tab.querySelectorAll('tr'));
                 for (const row of rows) {
                     if (rowCount >= 10) break;
                     try {
-                        let el = null;
-                        if (v.selector) {
-                            el = row.querySelector(v.selector);
+                        // Get cached variable values
+                        let ctx = null;
+                        if (row.dataset.varValues) {
+                            try {
+                                ctx = JSON.parse(row.dataset.varValues);
+                            } catch (e) {
+                                ctx = null;
+                            }
                         }
-                        // Extract value directly using textContent.trim()
-                        const val = el ? el.textContent.trim() : '';
+
+                        // Use the cached value for this variable
+                        const val = ctx && ctx[v.name] !== undefined ? ctx[v.name] : 'UNCACHED';
                         previews.push(val);
 
                         rowCount++;
