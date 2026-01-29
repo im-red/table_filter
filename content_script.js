@@ -2,6 +2,9 @@
     const STORAGE_KEY_PREFIX = 'table_filter_state::';
     let overlay = null;
     let state = null;
+    let rowTooltip = null;
+    let tooltipListenersAttached = false;
+    let tooltipActiveRow = null;
 
     // Helper function to clean up cached data
     function cleanupCachedData(tables) {
@@ -21,6 +24,7 @@
         // Create a new table element
         const filteredTable = originalTable.cloneNode(false); // Clone without children
         filteredTable.id = originalTable.id + '-filtered';
+        filteredTable.classList.add('tf-filtered-table');
         filteredTable.style.display = '';
 
         // Clone the header if it exists
@@ -227,7 +231,11 @@
           <div id="tf-sort-preview-detail" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;border:1px solid #d0e0d0;padding:4px;background:#f8fff8;border-radius:2px;font-size:12px;font-family:monospace;color:#555;"></div>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+      <div style="display:flex;align-items:center;gap:12px;justify-content:flex-end">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#333">
+          <input id="tf-tooltip-enabled" type="checkbox" checked />
+          Tooltip
+        </label>
         <span id="tf-filtered-count" style="font-size:12px;color:#666;display:none">Filtered: -</span>
         <button id="tf-apply">Apply</button>
         <button id="tf-restore">Restore</button>
@@ -278,12 +286,20 @@
         await loadState();
         renderVars();
         updateTableInfo();
+        highlightTargetTables();
+        await updateAllRowsCache();
         updateVarPreviews();
+        updateFilterPreview();
+        updateSortPreview();
+        syncTooltipEnabledState();
     }
 
     function hideOverlay() {
         if (!overlay) return;
         overlay.style.display = 'none';
+        clearTargetTableHighlight();
+        detachTooltipListeners();
+        hideRowTooltip();
         // restore any hidden rows' display to original? We leave rows as-is; user can reapply
     }
 
@@ -359,6 +375,7 @@
         document.getElementById('tf-table-selector').addEventListener('blur', async () => {
             await persistState();
             updateTableInfo();
+            highlightTargetTables();
             // Update cache for all relevant rows since table selector changed
             await updateAllRowsCache();
             updateVarPreviews();
@@ -392,6 +409,15 @@
             updateSortPreview();
         });
 
+        const tooltipToggle = document.getElementById('tf-tooltip-enabled');
+        if (tooltipToggle) {
+            tooltipToggle.checked = state.tooltipEnabled !== false;
+            tooltipToggle.addEventListener('change', async () => {
+                await persistState();
+                syncTooltipEnabledState();
+            });
+        }
+
         // Update preview initially
         updateFilterPreview();
         updateSortPreview();
@@ -411,6 +437,13 @@
     function gatherSortConfigFromUI() {
         return {
             sortExpression: document.getElementById('tf-sort-expression').value || ''
+        };
+    }
+
+    function gatherTooltipConfigFromUI() {
+        const tooltipToggle = document.getElementById('tf-tooltip-enabled');
+        return {
+            tooltipEnabled: tooltipToggle ? tooltipToggle.checked : true
         };
     }
 
@@ -590,9 +623,10 @@
         const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
         const vars = gatherVarsFromUI();
         const sortConfig = gatherSortConfigFromUI();
+        const tooltipConfig = gatherTooltipConfigFromUI();
 
         // Save temporarily to state
-        state = { tableSelector, filterExpr, vars, ...sortConfig };
+        state = { tableSelector, filterExpr, vars, ...sortConfig, ...tooltipConfig };
         updateTableInfo(); // Update total count
 
         // Since cache is already updated on input changes, 
@@ -603,6 +637,7 @@
         updateVarPreviews();
         updateFilterPreview();
         updateSortPreview();
+        syncTooltipEnabledState();
     }
 
     async function applyFilter(s) {
@@ -715,7 +750,8 @@
         const filterExpr = document.getElementById('tf-filter-expr').value.trim() || 'true';
         const vars = gatherVarsFromUI();
         const sortConfig = gatherSortConfigFromUI();
-        const toSave = { tableSelector, filterExpr, vars, ...sortConfig };
+        const tooltipConfig = gatherTooltipConfigFromUI();
+        const toSave = { tableSelector, filterExpr, vars, ...sortConfig, ...tooltipConfig };
         state = toSave;
         try {
             const key = await getStorageKey();
@@ -802,6 +838,7 @@
             tableSelector: 'table',
             filterExpr: 'true',
             sortExpression: '',
+            tooltipEnabled: true,
             vars: [
                 { name: 'v1', selector: 'td:nth-child(1)', type: 'number' },
                 { name: 'v2', selector: 'td:nth-child(2)', type: 'number' },
@@ -985,6 +1022,159 @@
         }
     }
 
+    function getCurrentTableSelector() {
+        const input = document.getElementById('tf-table-selector');
+        if (input && input.value.trim()) return input.value.trim();
+        if (state && state.tableSelector) return state.tableSelector;
+        return 'table';
+    }
+
+    function getTargetTables() {
+        const selector = getCurrentTableSelector();
+        try {
+            return Array.from(document.querySelectorAll(`${selector}:not(#table-filter-overlay *):not([id$="-filtered"])`));
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function getTargetTableForRow(row) {
+        const selector = getCurrentTableSelector();
+        try {
+            let table = row.closest(selector);
+            if (!table) {
+                table = row.closest('.tf-filtered-table');
+            }
+            if (!table) return null;
+            if (table.closest('#table-filter-overlay')) return null;
+            return table;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function ensureTargetTableStyle() {
+        if (document.getElementById('tf-target-table-style')) return;
+        const style = document.createElement('style');
+        style.id = 'tf-target-table-style';
+        style.textContent = '.tf-target-table{outline:2px solid #4a90e2;outline-offset:2px;}';
+        document.head.appendChild(style);
+    }
+
+    function highlightTargetTables() {
+        ensureTargetTableStyle();
+        document.querySelectorAll('.tf-target-table').forEach(table => table.classList.remove('tf-target-table'));
+        getTargetTables().forEach(table => table.classList.add('tf-target-table'));
+    }
+
+    function clearTargetTableHighlight() {
+        document.querySelectorAll('.tf-target-table').forEach(table => table.classList.remove('tf-target-table'));
+    }
+
+    function isOverlayVisible() {
+        return overlay && overlay.style.display !== 'none';
+    }
+
+    function isTooltipEnabled() {
+        if (state && state.tooltipEnabled === false) return false;
+        const tooltipToggle = document.getElementById('tf-tooltip-enabled');
+        if (!tooltipToggle) return true;
+        return tooltipToggle.checked;
+    }
+
+    function ensureRowTooltip() {
+        if (rowTooltip && rowTooltip.parentElement) return rowTooltip;
+        rowTooltip = document.createElement('div');
+        rowTooltip.style.cssText = 'position:fixed;z-index:2147483647;max-width:420px;background:#222;color:#fff;padding:6px 8px;border-radius:4px;font-size:12px;white-space:pre-wrap;pointer-events:none;display:none;box-shadow:0 2px 8px rgba(0,0,0,.25)';
+        document.body.appendChild(rowTooltip);
+        return rowTooltip;
+    }
+
+    function getRowCacheTooltipText(row) {
+        const parts = [];
+        if (row.dataset.varValues) {
+            try {
+                const vars = JSON.parse(row.dataset.varValues);
+                parts.push(`vars: ${JSON.stringify(vars)}`);
+            } catch (e) {
+                parts.push(`vars: ${row.dataset.varValues}`);
+            }
+        }
+        if (row.dataset.filterResult !== undefined) {
+            parts.push(`filterResult: ${row.dataset.filterResult}`);
+        }
+        if (row.dataset.sortValue !== undefined) {
+            parts.push(`sortValue: ${row.dataset.sortValue}`);
+        }
+        if (!parts.length) {
+            return 'No cached data';
+        }
+        return parts.join('\n');
+    }
+
+    function hideRowTooltip() {
+        if (rowTooltip) rowTooltip.style.display = 'none';
+        tooltipActiveRow = null;
+    }
+
+    function onTooltipMouseOver(event) {
+        if (!isOverlayVisible()) return;
+        if (!isTooltipEnabled()) return;
+        const row = event.target.closest('tr');
+        if (!row) return;
+        const table = getTargetTableForRow(row);
+        if (!table) return;
+        if (tooltipActiveRow === row) return;
+        tooltipActiveRow = row;
+        const tooltip = ensureRowTooltip();
+        tooltip.textContent = getRowCacheTooltipText(row);
+        tooltip.style.display = 'block';
+        updateTooltipPosition(event);
+    }
+
+    function updateTooltipPosition(event) {
+        if (!rowTooltip || rowTooltip.style.display === 'none') return;
+        const offset = 12;
+        rowTooltip.style.left = `${event.clientX + offset}px`;
+        rowTooltip.style.top = `${event.clientY + offset}px`;
+    }
+
+    function onTooltipMouseOut(event) {
+        if (!tooltipActiveRow) return;
+        const related = event.relatedTarget;
+        if (related && tooltipActiveRow.contains(related)) return;
+        hideRowTooltip();
+    }
+
+    function attachTooltipListeners() {
+        if (tooltipListenersAttached) return;
+        if (!isTooltipEnabled()) return;
+        document.addEventListener('mouseover', onTooltipMouseOver, true);
+        document.addEventListener('mouseout', onTooltipMouseOut, true);
+        tooltipListenersAttached = true;
+    }
+
+    function detachTooltipListeners() {
+        if (!tooltipListenersAttached) return;
+        document.removeEventListener('mouseover', onTooltipMouseOver, true);
+        document.removeEventListener('mouseout', onTooltipMouseOut, true);
+        tooltipListenersAttached = false;
+    }
+
+    function syncTooltipEnabledState() {
+        if (!isOverlayVisible()) {
+            detachTooltipListeners();
+            hideRowTooltip();
+            return;
+        }
+        if (isTooltipEnabled()) {
+            attachTooltipListeners();
+        } else {
+            detachTooltipListeners();
+            hideRowTooltip();
+        }
+    }
+
     // message listener to toggle overlay
     chrome.runtime.onMessage.addListener(async (msg, sender, resp) => {
         if (msg && msg.type === 'TOGGLE_TABLE_FILTER_OVERLAY') {
@@ -992,6 +1182,7 @@
             if (existing && existing.style.display !== 'none') hideOverlay(); else await showOverlay();
         }
     });
+
 
     // make sure overlay can be created if extension icon clicked before DOMContentLoaded
     if (document.readyState === 'loading') {
