@@ -6,20 +6,6 @@ function safeEvaluate(expr, context) {
         // Prepare context with all necessary functions and objects
         const evalContext = {
             ...context,
-            // Add common global functions and objects
-            parseFloat: parseFloat,
-            parseInt: parseInt,
-            Number: Number,
-            String: String,
-            Boolean: Boolean,
-            Math: Math,
-            Array: Array,
-            Object: Object,
-            Date: Date,
-            isNaN: isNaN,
-            isFinite: isFinite,
-            encodeURIComponent: encodeURIComponent,
-            decodeURIComponent: decodeURIComponent,
             // Add document as stub to prevent errors
             document: {
                 getElementById: () => null,

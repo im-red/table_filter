@@ -84,6 +84,13 @@
         if (row.dataset.varValues) {
             try {
                 ctx = JSON.parse(row.dataset.varValues);
+                // Check if all current variables are present in the cache
+                for (const v of vars) {
+                    if (ctx[v.name] === undefined) {
+                        ctx = null; // Force recalculation if any variable is missing
+                        break;
+                    }
+                }
             } catch (e) {
                 ctx = null; // Fallback to recalculation
             }
