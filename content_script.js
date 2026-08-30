@@ -299,6 +299,10 @@
         updateFilterPreview();
         updateSortPreview();
         syncTooltipEnabledState();
+
+        if (state && (state.filterExpr !== 'true' || (state.sortExpression && state.sortExpression !== ''))) {
+            await applyAndShow();
+        }
     }
 
     function hideOverlay() {
